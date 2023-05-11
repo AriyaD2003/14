@@ -1,112 +1,141 @@
+from flask import Flask, request, redirect, session
 import sqlite3
-from flask import Flask, jsonify
-
-app = Flask(__name__)
-DATABASE = 'netflix.db'
+import json
+from collections import Counter
 
 
-def execute_query(query, args=()):
-    with sqlite3.connect(DATABASE) as con:
+def main():
+    app = Flask(__name__)
+
+    def db_connect(db, query):
+        """Connect to db for data selection"""
+        con = sqlite3.connect(db)
         cur = con.cursor()
-        result = cur.execute(query, args)
-        con.commit()
+        cur.execute(query)
+        result = cur.fetchall()
+        con.close()
         return result
 
+    @app.route('/movie/title/')
+    def search_title():
+        if request.method == 'GET':
+            response = {}
+            title = request.args.get('title')
+            if title:
+                query = f"SELECT title, country, release_year, listed_in, description FROM netflix " \
+                        f"WHERE title = '{title}' " \
+                        f"ORDER BY release_year DESC " \
+                        f"LIMIT 1"
+                result = db_connect('netflix.db', query)
+                if len(result):
+                    response = {
+                        "title": result[0][0],
+                        "country": result[0][1],
+                        "release_year": result[0][2],
+                        "genre": result[0][3],
+                        "description": result[0][4]
+                    }
+        return json.dumps(response)
 
-def get_movie_by_title(title):
-    query = '''
-    SELECT title, country, release_year, listed_in AS genre, description
-    FROM netflix
-    WHERE title LIKE ?
-    ORDER BY release_year DESC
-    LIMIT 1
-    '''
-    result = execute_query(query, (f'%{title}%',)).fetchone()
-    if not result:
-        return jsonify({'message': 'Movie not found'})
-    keys = ['title', 'country', 'release_year', 'genre', 'description']
-    return jsonify(dict(zip(keys, result)))
+    @app.route('/movie/year/')
+    def search_year():
+        if request.method == 'GET':
+            response = []
+            start_year = request.args.get('start_year')
+            end_year = request.args.get('end_year')
+            if start_year and end_year:
+                query = f"SELECT title, release_year FROM netflix " \
+                        f"WHERE release_year BETWEEN {start_year} AND {end_year} " \
+                        f"LIMIT 100"
+                result = db_connect('netflix.db', query)
+                for line in result:
+                    line_dict = {
+                        "title": line[0],
+                        "release_year": line[1]
+                    }
+                    response.append(line_dict)
+        return json.dumps(response)
 
+    def get_rating(data_rating):
+        response = []
+        rating = data_rating.join(",")
+        query = f"SELECT title, rating, description FROM netflix WHERE rating IN ({rating})"
+        result = db_connect('netflix.db', query)
+        for line in result:
+            line_dict = {
+                "title": line[0],
+                "rating": line[1],
+                "description": line[2]
+            }
+            response.append(line_dict)
+        return response
 
-def get_movies_by_year_range(start_year, end_year):
-    query = '''
-    SELECT title, release_year
-    FROM netflix
-    WHERE release_year BETWEEN ? AND ?
-    ORDER BY release_year DESC
-    LIMIT 100
-    '''
-    result = execute_query(query, (start_year, end_year)).fetchall()
-    if not result:
-        return jsonify({'message': 'Movies not found'})
-    return jsonify([dict(zip(['title', 'release_year'], row)) for row in result])
+    @app.route('/search/rating/')
+    def search_rating():
+        if request.method == 'GET':
+            rating = request.args.get('rating')
+            response = get_rating([rating])
+            return json.dumps(response)
 
+    @app.route('/rating/children/')
+    def rating_children():
+        response = get_rating(['G'])
+        return json.dumps(response)
 
-def get_movies_by_rating(rating_list):
-    query = '''
-    SELECT title, rating, description
-    FROM netflix
-    WHERE rating IN ({})
-    '''.format(','.join(['?' for _ in rating_list]))
-    result = execute_query(query, tuple(rating_list)).fetchall()
-    if not result:
-        return jsonify({'message': 'Movies not found'})
-    keys = ['title', 'rating', 'description']
-    return jsonify([dict(zip(keys, row)) for row in result])
+    @app.route('/rating/family/')
+    def rating_family():
+        response = get_rating(['PG', 'PG-13'])
+        return json.dumps(response)
 
+    @app.route('/rating/adult/')
+    def rating_adult():
+        response = get_rating(['R', 'NC-17'])
+        return json.dumps(response)
 
-def get_movies_by_genre(genre):
-    query = '''
-    SELECT title, description
-    FROM netflix
-    WHERE listed_in LIKE ?
-    ORDER BY release_year DESC
-    LIMIT 10
-    '''
-    result = execute_query(query, (f'%{genre}%',)).fetchall()
-    if not result:
-        return jsonify({'message': 'Movies not found'})
-    keys = ['title', 'description']
-    return jsonify([dict(zip(keys, row)) for row in result])
+    def search_genre(genre):
+        query = f"SELECT title, description FROM netflix " \
+                f"WHERE genre = {genre} " \
+                f"ORDER BY release_year DESC " \
+                f"LIMIT 10"
+        result = db_connect('netflix.db', query)
+        response = []
+        for line in result:
+            line_dict = {
+                "title": line[0],
+                "description": line[1]
+            }
+        return json.dumps(response)
 
+    def search_pair(actor1, actor2):
+        query = f"SELECT \"cast\" FROM netflix " \
+                f"WHERE \"cast\" LIKE '%{actor1}%' AND \"cast\" LIKE '%{actor2}%'"
+        result = db_connect('netflix.db', query)
+        result_list = []
+        for line in result:
+            line_list = line[0].split(',')
+            result_list += line_list
+        counter = Counter(result_list)
+        actors_list = []
+        for key, value in counter.items():
+            if value > 2 and key.strip() not in [actor1, actor2]:
+                actors_list.append(key)
+        return actors_list
 
-def get_movies_by_type_year_genre(movie_type, year, genre):
-    query = '''
-    SELECT title, description
-    FROM netflix
-    WHERE type = ? AND release_year = ? AND listed_in LIKE ?
-    '''
-    result = execute_query(query, (movie_type, year, f'%{genre}%')).fetchall()
-    if not result:
-        return jsonify({'message': 'Movies not found'})
-    keys = ['title', 'description']
-    return jsonify([dict(zip(keys, row)) for row in result])
+    def full_search(m_type, release_year, genre):
+        query = f"SELECT title, description FROM netflix " \
+                f"WHERE listed_in LIKE '%{m_type}%' AND release_year = {release_year} AND listed_in LIKE '%{genre}%'"
+        result = db_connect('netflix.db', query)
+        response = []
+        for line in result:
+            line_dict = {
+                "title": line[0],
+                "description": line[1]
+            }
+        return json.dumps(response)
 
-
-@app.route('/movie/<title>')
-def movie_by_title(title):
-    return get_movie_by_title(title)
-
-
-@app.route('/movie/year/<start_year>/<end_year>')
-def movies_by_year_range(start_year, end_year):
-    return get_movies_by_year_range(start_year, end_year)
-
-
-@app.route('/movie/rating/<rating_list>')
-def movies_by_rating(rating_list):
-    return get_movies_by_rating(rating_list.split(','))
-
-
-@app.route('/genre/<genre>')
-def movies_by_genre(genre):
-    return get_movies_by_genre(genre)
-
-
-@app.route('/movie/type_year_genre/<movie_type>/<year>/<genre>')
-def movies_by_type_year_genre(movie_type, year, genre):
-    return get_movies_by_type_year_genre(movie_type, year, genre)
-    
-
-if __name__ == "__main__":
     app.run()
+
+
+if __name__ == '__main__':
+    main()
+    
